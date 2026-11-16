@@ -78,6 +78,12 @@ class Config:
     paper_mode: bool
     log_level: str
 
+    # --- On-chain redemption (defaults keep older constructors working) ---
+    polygon_rpc: str = "https://polygon-bor-rpc.publicnode.com"
+    polygon_rpc_fallback: str = ""
+    tx_timeout_sec: float = 120.0
+    max_hedge_price: float = 0.85
+
 
 def load_config() -> Config:
     return Config(
@@ -115,6 +121,10 @@ def load_config() -> Config:
         port=_env_int("BOT_PORT", 8500),
         paper_mode=_env_bool("BOT_PAPER_MODE", True),
         log_level=_env_str("BOT_LOG_LEVEL", "INFO"),
+        polygon_rpc=_env_str("BOT_POLYGON_RPC", "https://polygon-bor-rpc.publicnode.com"),
+        polygon_rpc_fallback=_env_str("BOT_POLYGON_RPC_FALLBACK", ""),
+        tx_timeout_sec=_env_float("BOT_TX_TIMEOUT_SEC", 120.0),
+        max_hedge_price=_env_float("BOT_MAX_HEDGE_PRICE", 0.85),
     )
 
 
