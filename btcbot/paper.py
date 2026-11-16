@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 
@@ -11,8 +12,9 @@ from .models import Market, OpenPosition, Signal, TradeRecord
 
 log = logging.getLogger(__name__)
 
-# Simulated spread: we assume we'd cross the spread
-SIMULATED_SPREAD = 0.02
+# Simulated spread: we assume we'd cross the spread.
+# Override with BOT_PAPER_SPREAD (e.g. 0.04) to stress-test paper results.
+SIMULATED_SPREAD = float(os.environ.get("BOT_PAPER_SPREAD", "0.02"))
 
 
 class PaperExecutor:
