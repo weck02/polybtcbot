@@ -144,7 +144,9 @@ class Executor:
         """Buy the opposite side to hedge a losing position.
 
         Tries FOK first for instant fill; if it can't be fully filled, falls
-        back to an aggressive GTC limit at ``est_price + limit_slippage``.
+        back to an aggressive GTC limit at ``est_price + limit_slippage``,
+        unless that price would exceed ``max_hedge_price`` (then the hedge is
+        skipped, since the locked-in loss would be nearly as bad as no hedge).
         Only returns a TradeRecord if real shares were acquired.
         """
         if not self._client:
@@ -183,6 +185,16 @@ class Executor:
                 log.info("Hedge FOK unfilled — falling back to limit order")
             else:
                 log.warning("Hedge FOK failed unexpectedly", exc_info=True)
+
+        # Guard: don't chase an uneconomic hedge with an aggressive limit.
+        if est_price + CONFIG.limit_slippage > CONFIG.max_hedge_price:
+            log.warning(
+                "Hedge limit skipped for %s: %.3f + slippage exceeds max %.3f",
+                market.slug,
+                est_price,
+                CONFIG.max_hedge_price,
+            )
+            return None
 
         # Fallback: aggressive limit order so the position doesn't stay
         # unhedged on a thin book.
@@ -223,13 +235,14 @@ class Executor:
         return None
 
     def _redeem_sync(self, condition_id: str) -> str:
-        """Synchronous on-chain redemption (runs in thread)."""
+        """Synchronous on-chain redemption (runs in thread).
+
+        Tries the primary RPC, then the optional fallback, for building and
+        sending the transaction. Once a tx is sent it is never re-sent; only
+        the receipt wait is bounded by ``tx_timeout_sec``.
+        """
         from web3 import Web3
         from web3.middleware import ExtraDataToPOAMiddleware
-
-        w3 = Web3(Web3.HTTPProvider("https://polygon-bor-rpc.publicnode.com"))
-        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-        account = w3.eth.account.from_key(CONFIG.private_key)
 
         USDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
         CTF = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
@@ -246,17 +259,44 @@ class Executor:
             "type": "function",
         }]
 
-        ctf = w3.eth.contract(address=CTF, abi=abi)
-        tx = ctf.functions.redeemPositions(
-            USDC,
-            b"\x00" * 32,
-            bytes.fromhex(condition_id[2:]) if condition_id.startswith("0x") else bytes.fromhex(condition_id),
-            [1, 2],
-        ).build_transaction({"from": account.address, "nonce": w3.eth.get_transaction_count(account.address)})
+        cond_bytes = (
+            bytes.fromhex(condition_id[2:])
+            if condition_id.startswith("0x")
+            else bytes.fromhex(condition_id)
+        )
 
-        signed = account.sign_transaction(tx)
-        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-        w3.eth.wait_for_transaction_receipt(tx_hash)
+        urls = [u for u in (CONFIG.polygon_rpc, CONFIG.polygon_rpc_fallback) if u]
+        last_exc: Exception | None = None
+        w3 = None
+        tx_hash = None
+
+        for url in urls:
+            try:
+                w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 30}))
+                w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                account = w3.eth.account.from_key(CONFIG.private_key)
+                ctf = w3.eth.contract(address=CTF, abi=abi)
+                tx = ctf.functions.redeemPositions(
+                    USDC,
+                    b"\x00" * 32,
+                    cond_bytes,
+                    [1, 2],
+                ).build_transaction(
+                    {"from": account.address, "nonce": w3.eth.get_transaction_count(account.address)}
+                )
+                signed = account.sign_transaction(tx)
+                tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                break
+            except Exception as e:
+                if "not received yet" in str(e):
+                    raise  # oracle not ready: let redeem() retry later
+                last_exc = e
+                log.warning("Redeem via RPC %s failed, trying next", url, exc_info=True)
+
+        if tx_hash is None or w3 is None:
+            raise last_exc or RuntimeError("No Polygon RPC configured")
+
+        w3.eth.wait_for_transaction_receipt(tx_hash, timeout=CONFIG.tx_timeout_sec)
         return tx_hash.hex()
 
     def _fok_buy(self, token_id: str, amount_usd: float) -> dict | None:
