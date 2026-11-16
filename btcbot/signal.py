@@ -9,6 +9,9 @@ from collections import deque
 from .config import CONFIG
 from .models import Market, Signal
 
+# If the newest BTC tick is older than this, momentum is treated as unknown (0).
+MAX_TICK_AGE_SEC = 10.0
+
 
 def _sigmoid(x: float) -> float:
     """Standard sigmoid squashing to (0, 1)."""
@@ -58,6 +61,9 @@ class SignalGenerator:
         Compares our estimated fair probability (based on BTC momentum and
         current delta from the window start) against Polymarket's implied odds.
         Returns a Signal with direction, strength, and edge.
+
+        Note: ``btc_price`` is currently unused (the Chainlink price drives the
+        delta); it is kept for API compatibility with the engine.
         """
         # Can't trade without Polymarket prices
         if poly_up_price is None or poly_down_price is None:
@@ -169,9 +175,18 @@ class SignalGenerator:
         return max(min_clamp, min(max_clamp, raw_prob))
 
     def _calc_momentum(self, seconds: float) -> float:
-        """Price change in $/second over the last N seconds."""
-        now = time.time()
-        cutoff = now - seconds
+        """Price change in $/second over the last N seconds.
+
+        The window is anchored on the newest tick's own timestamp rather than
+        the local clock, so exchange/server clock skew does not shift it. If
+        the newest tick is stale (feed stalled) momentum is reported as 0.
+        """
+        if not self._btc_prices:
+            return 0.0
+        latest_ts = self._btc_prices[-1][0]
+        if time.time() - latest_ts > MAX_TICK_AGE_SEC:
+            return 0.0
+        cutoff = latest_ts - seconds
         recent = [(ts, p) for ts, p in self._btc_prices if ts >= cutoff]
         if len(recent) < 2:
             return 0.0
